@@ -63,6 +63,7 @@ class HarrisCountyRainfallScraper:
         encoded_date = quote(formatted_date)
         
         # Construct the complete URL with all required parameters
+        # Remove increment parameter as it's not a URL parameter - it's controlled by the dropdown
         url = f"{self.base_url}/GageDetail/Index/{location_id}?From={encoded_date}&span={quote(span)}&r=1&v=rainfall&selIdx=1"
         
         return url
@@ -167,7 +168,8 @@ class HarrisCountyRainfallScraper:
 
     def extract_devexpress_grid_data(self, soup: BeautifulSoup) -> Optional[List[Dict]]:
         """
-        Extract data from DevExpress grid controls.
+        Extract data from DevExpress grid controls, specifically looking for 
+        Reading Date From/To/Rain column structure.
         
         Args:
             soup (BeautifulSoup): Parsed HTML content
@@ -178,29 +180,57 @@ class HarrisCountyRainfallScraper:
         rainfall_data = []
         
         try:
-            # Look for DevExpress grid tables
-            grid_tables = soup.find_all('table', {'id': re.compile(r'.*GridView.*|.*Grid.*')})
+            # Look for DevExpress grid tables - use a smarter approach to avoid duplicates
+            # Get all potential grid tables
+            all_grid_tables = soup.find_all('table', {'id': re.compile(r'.*GridView.*|.*Grid.*')})
             
-            for table in grid_tables:
-                # Look for rows with date and rainfall data
+            # Group tables by their base name (remove _DXMainTable, _DXHeaderTable, etc.)
+            table_groups = {}
+            for table in all_grid_tables:
+                table_id = table.get('id', 'no-id')
+                # Extract base name (before _DX suffix)
+                base_name = re.sub(r'_DX.*$', '', table_id)
+                if base_name not in table_groups:
+                    table_groups[base_name] = []
+                table_groups[base_name].append((table, table_id))
+            
+            # For each group, prefer _DXMainTable over the base table
+            tables_to_process = []
+            for base_name, tables in table_groups.items():
+                # Look for main table first
+                main_table = None
+                base_table = None
+                for table, table_id in tables:
+                    if table_id.endswith('_DXMainTable'):
+                        main_table = (table, table_id)
+                    elif table_id == base_name:
+                        base_table = (table, table_id)
+                
+                # Prefer main table, fallback to base table
+                if main_table:
+                    tables_to_process.append(main_table)
+                elif base_table:
+                    tables_to_process.append(base_table)
+            
+            for table, table_id in tables_to_process:
+                # Look for rows with the specific 3-column structure: Date From, Date To, Rain
                 rows = table.find_all('tr')
                 for row in rows:
                     cells = row.find_all(['td', 'th'])
-                    if len(cells) >= 3:  # Expect at least date, time, and value columns
-                        # Try to extract date and rainfall values
+                    if len(cells) >= 3:  # Need at least 3 columns
                         text_content = [cell.get_text(strip=True) for cell in cells]
                         
-                        # Look for date patterns and numeric values
-                        for i, text in enumerate(text_content):
-                            if self.is_date_string(text) and i + 2 < len(text_content):
-                                # Check if there's a rainfall value nearby
-                                for j in range(i, min(i + 3, len(text_content))):
-                                    if self.is_rainfall_value(text_content[j]):
-                                        rainfall_data.append({
-                                            'date': text,
-                                            'rainfall': self.clean_rainfall_value(text_content[j])
-                                        })
-                                        break
+                        # Check if this looks like a data row with: Date From | Date To | Rain
+                        if (len(text_content) >= 3 and 
+                            self.is_date_string(text_content[0]) and  # Reading Date From
+                            self.is_date_string(text_content[1]) and  # Reading Date To  
+                            self.is_rainfall_value(text_content[2])):  # Rain amount
+                            
+                            rainfall_data.append({
+                                'date_from': text_content[0],
+                                'date_to': text_content[1], 
+                                'rainfall': self.clean_rainfall_value(text_content[2])
+                            })
             
             return rainfall_data if rainfall_data else None
             
@@ -210,7 +240,7 @@ class HarrisCountyRainfallScraper:
 
     def extract_table_rainfall_data(self, soup: BeautifulSoup) -> Optional[List[Dict]]:
         """
-        Extract rainfall data from standard HTML tables.
+        Extract rainfall data from standard HTML tables with Reading Date From/To/Rain structure.
         
         Args:
             soup (BeautifulSoup): Parsed HTML content
@@ -234,8 +264,22 @@ class HarrisCountyRainfallScraper:
                     
                     for row in rows:
                         cells = row.find_all('td')
-                        if len(cells) >= 2:
-                            # Try to find date and rainfall columns
+                        if len(cells) >= 3:
+                            # Look for the 3-column pattern: Date From | Date To | Rain
+                            cell_texts = [cell.get_text(strip=True) for cell in cells]
+                            
+                            # Check for the specific pattern we expect
+                            if (self.is_date_string(cell_texts[0]) and 
+                                self.is_date_string(cell_texts[1]) and 
+                                self.is_rainfall_value(cell_texts[2])):
+                                
+                                rainfall_data.append({
+                                    'date_from': cell_texts[0],
+                                    'date_to': cell_texts[1],
+                                    'rainfall': self.clean_rainfall_value(cell_texts[2])
+                                })
+                        elif len(cells) >= 2:
+                            # Fallback: try to find any date and rainfall columns
                             date_col = None
                             rain_col = None
                             
@@ -248,7 +292,8 @@ class HarrisCountyRainfallScraper:
                             
                             if date_col and rain_col is not None:
                                 rainfall_data.append({
-                                    'date': date_col,
+                                    'date_from': date_col,
+                                    'date_to': date_col,  # Same date for from/to
                                     'rainfall': rain_col
                                 })
             
@@ -260,7 +305,7 @@ class HarrisCountyRainfallScraper:
 
     def extract_text_patterns(self, html_content: str) -> Optional[List[Dict]]:
         """
-        Extract rainfall data using text pattern matching.
+        Extract rainfall data using text pattern matching for Date From/To/Rain patterns.
         
         Args:
             html_content (str): The HTML content to search
@@ -271,24 +316,45 @@ class HarrisCountyRainfallScraper:
         rainfall_data = []
         
         try:
-            # Look for patterns that indicate rainfall data in text
-            patterns = [
-                r'(\d{1,2}/\d{1,2}/\d{4})\s+\d{1,2}:\d{2}\s+[AP]M.*?(\d+\.\d+)"?\s*(?:inch|in)',
-                r'(\d{1,2}/\d{1,2}/\d{4}).*?(\d+\.\d+)"?\s*(?:inch|in)',
-                r'(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}:\d{2}.*?(\d+\.\d+)',
+            # Look for patterns that match the table structure: Date From | Date To | Rain
+            # Pattern for: "8/22/2025 12:00 AM8/22/2025 12:00 PM0.08""
+            pattern = r'(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}\s+[AP]M)(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}\s+[AP]M)(\d+\.\d+)"'
+            
+            matches = re.findall(pattern, html_content, re.IGNORECASE)
+            for match in matches:
+                if len(match) == 3:
+                    date_from, date_to, rainfall_str = match
+                    try:
+                        rainfall_value = float(rainfall_str)
+                        rainfall_data.append({
+                            'date_from': date_from,
+                            'date_to': date_to,
+                            'rainfall': rainfall_value
+                        })
+                    except ValueError:
+                        continue
+            
+            # Also look for simpler patterns as fallback
+            simple_patterns = [
+                r'(\d{1,2}/\d{1,2}/\d{4})\s+\d{1,2}:\d{2}\s+[AP]M.*?(\d+\.\d+)"',
+                r'(\d{1,2}/\d{1,2}/\d{4}).*?(\d+\.\d+)"',
             ]
             
-            for pattern in patterns:
+            for pattern in simple_patterns:
                 matches = re.findall(pattern, html_content, re.IGNORECASE)
                 for match in matches:
                     if len(match) == 2:
                         date_str, rainfall_str = match
                         try:
                             rainfall_value = float(rainfall_str)
-                            rainfall_data.append({
-                                'date': date_str,
-                                'rainfall': rainfall_value
-                            })
+                            # Check if we already have this date to avoid duplicates
+                            existing = any(r.get('date_from') == date_str for r in rainfall_data)
+                            if not existing:
+                                rainfall_data.append({
+                                    'date_from': date_str,
+                                    'date_to': date_str,  # Same date for from/to
+                                    'rainfall': rainfall_value
+                                })
                         except ValueError:
                             continue
             
@@ -399,6 +465,8 @@ class HarrisCountyRainfallScraper:
     def parse_rainfall_data_to_tuples(self, rainfall_data: List[Dict]) -> List[Tuple[datetime, float]]:
         """
         Convert rainfall data from dict format to datetime tuples.
+        Handles both old format (date) and new format (date_from/date_to).
+        Implements deduplication by keeping only the highest rainfall value for each unique date.
         
         Args:
             rainfall_data (List[Dict]): List of rainfall data dictionaries
@@ -406,22 +474,28 @@ class HarrisCountyRainfallScraper:
         Returns:
             List[Tuple[datetime, float]]: List of (datetime, rainfall_amount) tuples
         """
-        rainfall_records = []  # Initialize list to store parsed records
-        seen_dates = {}  # Dictionary to track unique date/rainfall combinations
+        # Dictionary to store the maximum rainfall for each date
+        seen_dates = {}  # date -> (timestamp, max_rainfall)
         
         try:
             for record in rainfall_data:
-                date_str = record.get('date', '')
+                # Handle new format with date_from/date_to
+                if 'date_from' in record:
+                    date_str = record.get('date_from', '')
+                else:
+                    # Handle old format with just 'date'
+                    date_str = record.get('date', '')
+                
                 rainfall_value = record.get('rainfall', 0.0)
                 
                 if date_str:
                     # Try different date parsing formats
                     timestamp = None
                     
-                    # ISO format with T separator
-                    if 'T' in date_str:
+                    # MM/DD/YYYY HH:MM AM/PM format (most common from FWS)
+                    if not timestamp:
                         try:
-                            timestamp = datetime.fromisoformat(date_str.replace("T", " ").replace("Z", ""))
+                            timestamp = datetime.strptime(date_str, "%m/%d/%Y %I:%M %p")
                         except ValueError:
                             pass
                     
@@ -432,10 +506,10 @@ class HarrisCountyRainfallScraper:
                         except ValueError:
                             pass
                     
-                    # MM/DD/YYYY HH:MM AM/PM format
-                    if not timestamp:
+                    # ISO format with T separator
+                    if 'T' in date_str and not timestamp:
                         try:
-                            timestamp = datetime.strptime(date_str, "%m/%d/%Y %I:%M %p")
+                            timestamp = datetime.fromisoformat(date_str.replace("T", " ").replace("Z", ""))
                         except ValueError:
                             pass
                     
@@ -447,23 +521,23 @@ class HarrisCountyRainfallScraper:
                             pass
                     
                     if timestamp:
-                        # Create a unique key based on date (without time) to deduplicate
+                        # Get the date without time for deduplication
                         date_key = timestamp.date()
+                        rainfall_float = float(rainfall_value)
                         
-                        # Only add if we haven't seen this date before, or if this has a higher rainfall value
-                        if date_key not in seen_dates or seen_dates[date_key][1] < float(rainfall_value):
-                            seen_dates[date_key] = (timestamp, float(rainfall_value))
+                        # Keep only the highest rainfall value for each date
+                        if date_key not in seen_dates or rainfall_float > seen_dates[date_key][1]:
+                            seen_dates[date_key] = (timestamp, rainfall_float)
                     else:
                         print(f"Could not parse date: {date_str}")
-            
-            # Convert back to list of tuples
-            rainfall_records = list(seen_dates.values())
             
         except (ValueError, KeyError) as e:
             # Handle parsing errors for date/time or missing keys
             print(f"Error parsing rainfall data to tuples: {e}")
         
-        return rainfall_records  # Return the list of parsed records
+        # Convert the deduplicated seen_dates dictionary back to a list of tuples
+        rainfall_records = [timestamp_rainfall for timestamp_rainfall in seen_dates.values()]
+        return rainfall_records  # Return the deduplicated list of parsed records
 
     def filter_last_7_days(self, rainfall_data: List[Tuple[datetime, float]]) -> List[Tuple[datetime, float]]:
         """
@@ -505,7 +579,7 @@ class HarrisCountyRainfallScraper:
         total_rainfall = sum(rainfall for _, rainfall in rainfall_data)
         return total_rainfall
 
-    def scrape_rainfall_totals(self, location_id: str = "590") -> Optional[float]:
+    def scrape_rainfall_totals(self, location_id: str = "580") -> Optional[float]:
         """
         Main method to scrape and calculate rainfall totals for the 7 complete days prior to today.
         This excludes today's partial data to ensure accurate 24-hour rainfall measurements.
@@ -536,6 +610,8 @@ class HarrisCountyRainfallScraper:
             if not rainfall_data:
                 print("Failed to extract rainfall data")
                 return None
+            
+
             
             # Convert rainfall data to datetime tuples for processing
             rainfall_tuples = self.parse_rainfall_data_to_tuples(rainfall_data)
@@ -572,17 +648,17 @@ def main():
     Main function to demonstrate the rainfall scraper functionality.
     
     This function creates a scraper instance and retrieves the 7-day rainfall total
-    for the default location (590 - Cole Creek @ Deihl Road).
+    for the default location (580 - Brickhouse Gully @ Costa Rica Road).
     """
     # Create an instance of the rainfall scraper
     scraper = HarrisCountyRainfallScraper()
     
-    # Define the location ID for Cole Creek @ Deihl Road
-    location_id = "590"
+    # Define the location ID for Brickhouse Gully @ Costa Rica Road
+    location_id = "580"
     
     print("Harris County FWS Rainfall Scraper")
     print("=" * 40)
-    print(f"Fetching rainfall data for location {location_id} (Cole Creek @ Deihl Road)")
+    print(f"Fetching rainfall data for location {location_id} (Brickhouse Gully @ Costa Rica Road)")
     print("Calculating total rainfall for the 7 complete days prior to today...")
     print()
     

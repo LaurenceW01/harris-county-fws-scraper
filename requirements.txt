@@ -7,3 +7,4 @@ lxml>=4.9.0              # XML/HTML parser for BeautifulSoup
 python-dateutil>=2.8.0   # Enhanced date parsing capabilities
 flask>=2.3.0             # Web framework for API service
 flask-cors>=4.0.0        # CORS support for web API
+selenium>=4.15.0         # Web browser automation for enhanced scraping

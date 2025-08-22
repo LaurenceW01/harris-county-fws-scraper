@@ -9,17 +9,17 @@
  * 2. Go to Extensions > Apps Script
  * 3. Delete the default code and paste this code
  * 4. Save the project
- * 5. Use =getRainfallSimple("590") in your sheet cells
+ * 5. Use =getRainfallSimple("580") in your sheet cells
  */
 
 /**
  * Simple function to get rainfall data directly from Harris County FWS
  * This recreates the Python scraper logic in JavaScript
  * 
- * @param {string} locationId - The Harris County FWS location ID (default: "590")
+ * @param {string} locationId - The Harris County FWS location ID (default: "580")
  * @return {number} Total rainfall in inches for the past 7 complete days
  */
-function getRainfallSimple(locationId = "590") {
+function getRainfallSimple(locationId = "580") {
   try {
     // Construct the URL (similar to Python scraper)
     const currentDate = new Date();
@@ -28,13 +28,14 @@ function getRainfallSimple(locationId = "590") {
     
     const url = `https://www.harriscountyfws.org/GageDetail/Index/${locationId}?From=${encodedDate}&span=1%20Month&r=1&v=rainfall&selIdx=1`;
     
-    // Fetch the HTML content
+    // Fetch the HTML content with timeout
     const response = UrlFetchApp.fetch(url, {
       method: 'GET',
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
       },
-      muteHttpExceptions: true
+      muteHttpExceptions: true,
+      timeout: 10000 // 10 second timeout
     });
     
     if (response.getResponseCode() !== 200) {
@@ -73,33 +74,55 @@ function extractRainfallData(htmlContent) {
   const rainfallData = [];
   
   try {
-    // Look for patterns like "7/21/2025 12:00 AM7/22/2025 12:00 AM0.00""
-    const pattern = /(\d{1,2}\/\d{1,2}\/\d{4})\s+12:00\s+AM.*?(\d+\.\d+)"/g;
-    let match;
+    // Look for table rows with date ranges and rainfall values
+    // Pattern matches: "8/22/2025 12:00 AM8/22/2025 9:01 AM0.12"" or similar
+    const patterns = [
+      // Main pattern for date from, date to, rainfall
+      /(\d{1,2}\/\d{1,2}\/\d{4})\s+12:00\s+AM.*?(\d{1,2}\/\d{1,2}\/\d{4}).*?(\d+\.\d+)"/g,
+      // Fallback pattern for simpler format
+      /(\d{1,2}\/\d{1,2}\/\d{4}).*?(\d+\.\d+)"/g
+    ];
     
-    const seenDates = new Set(); // To avoid duplicates
+    const seenDates = new Map(); // Store max rainfall per date
     
-    while ((match = pattern.exec(htmlContent)) !== null) {
-      const dateStr = match[1];
-      const rainfallStr = match[2];
-      
-      try {
-        const date = new Date(dateStr);
-        const rainfall = parseFloat(rainfallStr);
+    for (const pattern of patterns) {
+      let match;
+      while ((match = pattern.exec(htmlContent)) !== null) {
+        let dateStr, rainfallStr;
         
-        if (!isNaN(rainfall) && !seenDates.has(dateStr)) {
-          rainfallData.push({
-            date: date,
-            rainfall: rainfall
-          });
-          seenDates.add(dateStr);
+        if (match.length === 4) {
+          // Date from, date to, rainfall format
+          dateStr = match[1];
+          rainfallStr = match[3];
+        } else {
+          // Date, rainfall format
+          dateStr = match[1];
+          rainfallStr = match[2];
         }
-      } catch (e) {
-        console.warn('Error parsing date/rainfall:', e);
+        
+        try {
+          const date = new Date(dateStr);
+          const rainfall = parseFloat(rainfallStr.replace(/"/g, ''));
+          
+          if (!isNaN(rainfall) && !isNaN(date.getTime())) {
+            const dateKey = dateStr;
+            
+            // Keep only the highest rainfall value for each date (deduplication)
+            if (!seenDates.has(dateKey) || rainfall > seenDates.get(dateKey).rainfall) {
+              seenDates.set(dateKey, {
+                date: date,
+                rainfall: rainfall
+              });
+            }
+          }
+        } catch (e) {
+          console.warn('Error parsing date/rainfall:', e);
+        }
       }
     }
     
-    // Sort by date (most recent first)
+    // Convert map to array and sort by date (most recent first)
+    Array.from(seenDates.values()).forEach(record => rainfallData.push(record));
     rainfallData.sort((a, b) => b.date - a.date);
     
   } catch (error) {
@@ -134,7 +157,7 @@ function filterLast7Days(rainfallData) {
  * @param {string} locationId - The location ID
  * @return {Array} [rainfall, location, timestamp]
  */
-function getRainfallDetails(locationId = "590") {
+function getRainfallDetails(locationId = "580") {
   const rainfall = getRainfallSimple(locationId);
   const locationName = getLocationName(locationId);
   const timestamp = new Date();
@@ -153,6 +176,7 @@ function getLocationName(locationId) {
     '530': 'White Oak Bayou @ Ella Boulevard',
     '540': 'White Oak Bayou @ Alabonson Road',
     '550': 'White Oak Bayou @ Lakeview Drive',
+    '580': 'Brickhouse Gully @ Costa Rica Road',
     '590': 'Cole Creek @ Deihl Road',
     '430': 'Brays Bayou @ Stella Link Road',
     '440': 'Brays Bayou @ Rice Avenue',
@@ -175,10 +199,11 @@ function createSimpleDashboard() {
   
   const data = [
     ['Location', 'ID', 'Rainfall (7 days)', 'Last Updated'],
-    ['Cole Creek @ Deihl Road', '590', '=getRainfallSimple("590")', '=NOW()'],
+    ['Brickhouse Gully @ Costa Rica Road', '580', '=getRainfallSimple("580")', '=NOW()'],
     ['White Oak Bayou @ Heights Blvd', '520', '=getRainfallSimple("520")', '=NOW()'],
     ['Brays Bayou @ Stella Link Road', '430', '=getRainfallSimple("430")', '=NOW()'],
-    ['White Oak Bayou @ Lakeview Drive', '550', '=getRainfallSimple("550")', '=NOW()']
+    ['White Oak Bayou @ Lakeview Drive', '550', '=getRainfallSimple("550")', '=NOW()'],
+    ['Cole Creek @ Deihl Road', '590', '=getRainfallSimple("590")', '=NOW()']
   ];
   
   const range = sheet.getRange(1, 1, data.length, data[0].length);
@@ -193,15 +218,55 @@ function createSimpleDashboard() {
 }
 
 /**
- * Test function
+ * Test function - run this in Apps Script editor first
  */
 function testRainfallFunction() {
-  const result = getRainfallSimple("590");
-  console.log('Test result for location 590:', result);
+  console.log('Starting test...');
   
-  if (typeof result === 'number') {
-    console.log('✅ Success! Rainfall:', result, 'inches');
-  } else {
-    console.log('❌ Failed:', result);
+  try {
+    const result = getRainfallSimple("580");
+    console.log('Test result for location 580:', result);
+    
+    if (typeof result === 'number') {
+      console.log('✅ Success! Rainfall:', result, 'inches');
+    } else {
+      console.log('❌ Failed:', result);
+    }
+  } catch (error) {
+    console.error('Test error:', error.toString());
+  }
+}
+
+/**
+ * Simple test function that doesn't use external URLs
+ * Use this in a cell first: =testBasic()
+ */
+function testBasic() {
+  return 'Hello from Apps Script!';
+}
+
+/**
+ * Test URL fetching specifically
+ */
+function testUrlFetch() {
+  try {
+    const url = 'https://www.harriscountyfws.org/GageDetail/Index/580?From=08/22/2025%2010:00%20AM&span=1%20Month&r=1&v=rainfall&selIdx=1';
+    console.log('Fetching URL:', url);
+    
+    const response = UrlFetchApp.fetch(url, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      muteHttpExceptions: true
+    });
+    
+    console.log('Response code:', response.getResponseCode());
+    console.log('Response length:', response.getContentText().length);
+    
+    return response.getResponseCode();
+  } catch (error) {
+    console.error('URL fetch error:', error.toString());
+    return `ERROR: ${error.toString()}`;
   }
 }
